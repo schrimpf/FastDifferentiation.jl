@@ -303,57 +303,87 @@ function check_edges(subgraph::FactorableSubgraph{T,S}, edge_list::Vector{PathEd
 end
 
 """
-    subgraph_edges(
-        subgraph::FactorableSubgraph{T},
-        sub_edges::Union{Nothing,Set{PathEdge{T}}}=nothing,
-        visited::Union{Nothing,Set{PathEdge{T}}}=nothing,
-        curr_node::Union{Nothing,T}=nothing
-    )
+    subgraph_edges(subgraph::FactorableSubgraph{T}) where {T}
 
-Returns all edges in the subgraph as a set. Recursively traverses the subgraph so will work even for subgraphs with branching paths."""
-function subgraph_edges(subgraph::FactorableSubgraph{T}, sub_edges::Union{Nothing,Set{PathEdge{T}}}=nothing, visited::Union{Nothing,Set{PathEdge{T}}}=nothing, curr_node::Union{Nothing,T}=nothing) where {T}
-    if sub_edges === nothing
-        sub_edges = Set{PathEdge{T}}()
-    end
+Returns all edges in the subgraph as a set that lie on connected paths from `dominated_node(subgraph)` to `dominating_node(subgraph)`. Traverses forward from the dominated node and filters out dead ends that do not reach the dominating node."""
+function subgraph_edges(subgraph::FactorableSubgraph{T}) where {T}
+    start_node = dominated_node(subgraph)
+    end_node = dominating_node(subgraph)
 
-    if visited === nothing
-        visited = Set{PathEdge{T}}()
-    end
+    # 1. Forward reachability from dominated_node
+    fwd_edges = PathEdge{T}[]
+    visited_nodes = Set{T}([start_node])
+    queue = T[start_node]
 
-    if curr_node === nothing
-        curr_node = dominated_node(subgraph)
-    end
-
-    for fedge in forward_edges(subgraph, curr_node)
-        if test_edge(subgraph, fedge) && !in(fedge, visited)
-            push!(sub_edges, fedge)
-            fvert = forward_vertex(subgraph, fedge)
-            if fvert != dominating_node(subgraph)
-                subgraph_edges(subgraph, sub_edges, visited, fvert)
+    while !isempty(queue)
+        curr = popfirst!(queue)
+        if curr == end_node
+            continue
+        end
+        for e in forward_edges(subgraph, curr)
+            if test_edge(subgraph, e)
+                push!(fwd_edges, e)
+                nxt = forward_vertex(subgraph, e)
+                if !in(nxt, visited_nodes)
+                    push!(visited_nodes, nxt)
+                    push!(queue, nxt)
+                end
             end
         end
     end
 
-    @assert length(sub_edges) ≥ 2 "If subgraph exists should be at least two valid edges in subgraph. Instead got none."
+    # 2. Backward reachability from dominating_node among fwd_edges
+    b_adj = Dict{T,Vector{PathEdge{T}}}()
+    for e in fwd_edges
+        fvert = forward_vertex(subgraph, e)
+        if !haskey(b_adj, fvert)
+            b_adj[fvert] = PathEdge{T}[]
+        end
+        push!(b_adj[fvert], e)
+    end
+
+    can_reach_end = Set{T}([end_node])
+    b_queue = T[end_node]
+    while !isempty(b_queue)
+        curr = popfirst!(b_queue)
+        if haskey(b_adj, curr)
+            for e in b_adj[curr]
+                prev_node = forward_vertex(subgraph, e) == top_vertex(e) ? bott_vertex(e) : top_vertex(e)
+                if !in(prev_node, can_reach_end)
+                    push!(can_reach_end, prev_node)
+                    push!(b_queue, prev_node)
+                end
+            end
+        end
+    end
+
+    # 3. Only retain edges whose target reaches dominating_node and whose source is reachable from dominated_node
+    sub_edges = Set{PathEdge{T}}()
+    for e in fwd_edges
+        if in(forward_vertex(subgraph, e), can_reach_end)
+            push!(sub_edges, e)
+        end
+    end
+
+    @assert length(sub_edges) ≥ 2 "If subgraph exists should be at least two valid edges in subgraph. Instead got $(length(sub_edges))."
 
     return sub_edges
 end
 
 
 """
-    deconstruct_subgraph(subgraph::FactorableSubgraph)
+    deconstruct_subgraph(subgraph::FactorableSubgraph{T}) where {T}
 
 Returns subgraph edges, as a `Set`, and nodes, as a `Vector`."""
-function deconstruct_subgraph(subgraph::FactorableSubgraph)
+function deconstruct_subgraph(subgraph::FactorableSubgraph{T}) where {T}
     sub_edges = subgraph_edges(subgraph)
-    sub_nodes = map(x -> bott_vertex(x), collect(sub_edges))
-    if subgraph isa FactorableSubgraph{T,DominatorSubgraph} where {T}
-        push!(sub_nodes, dominating_node(subgraph))
-    else
-        push!(sub_nodes, dominated_node(subgraph))
+    sub_nodes = T[]
+    for edge in sub_edges
+        push!(sub_nodes, top_vertex(edge))
+        push!(sub_nodes, bott_vertex(edge))
     end
 
-    return sub_edges, unique(sub_nodes)
+    return sub_edges, unique!(sub_nodes)
 end
 
 """
@@ -379,7 +409,7 @@ function subgraph_exists(subgraph::FactorableSubgraph)
         sub_edges = Set{PathEdge}()
 
         for edge in fedges
-            if isa_connected_path(subgraph, edge) !== nothing
+            if isa_connected_path(subgraph, edge)
                 count += 1
             end
 
