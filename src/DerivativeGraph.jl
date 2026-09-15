@@ -170,7 +170,7 @@ struct DerivativeGraph{T<:Integer}
 
         new_roots = Vector{Node}(undef, length(roots))
         for (i, root) in pairs(roots)
-            new_roots[i] = create_NoOp(root)
+            new_roots[i] = create_NoOp(is_NoOp(root) ? children(root)[1] : root)
         end
 
         (postorder_number, nodes, var_array) = postorder(new_roots)

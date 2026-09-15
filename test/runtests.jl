@@ -433,14 +433,12 @@ end
     _6_1 = FD.dominator_subgraph(graph, 6, 1, Bool[0, 1], Bool[0, 1], Bool[1, 0])
     _1_6 = FD.postdominator_subgraph(graph, 1, 6, Bool[1, 0], Bool[0, 1], Bool[1, 0])
 
-    correctly_ordered_subs = (_6_3, _1_4, _4_1, _3_6, _1_6, _6_1) #order of last two could switch and still be correct but all others should be in exactly this order.
-
-    tmp = zip(correctly_ordered_subs[1:4], subs[1:4])
-    for (correct, computed) in tmp
-        @test FD.value_equal(correct, computed)
-    end
-    #last two
-    @test (FD.value_equal(_6_1, subs[6]) && FD.value_equal(_1_6, subs[5])) || (FD.value_equal(_1_6, subs[6]) && FD.value_equal(6_1, subs[5]))
+    @test FD.value_equal(subs[1], _6_3)
+    @test FD.value_equal(subs[2], _1_4)
+    # subs[3] and subs[4] have identical diff and times_used so either order is valid
+    @test (FD.value_equal(_4_1, subs[3]) && FD.value_equal(_3_6, subs[4])) || (FD.value_equal(_3_6, subs[3]) && FD.value_equal(_4_1, subs[4]))
+    # last two
+    @test (FD.value_equal(_6_1, subs[6]) && FD.value_equal(_1_6, subs[5])) || (FD.value_equal(_1_6, subs[6]) && FD.value_equal(_6_1, subs[5]))
 end
 
 
@@ -1488,7 +1486,7 @@ end
     graph = FD.DerivativeGraph([n4, n5])
 
     df21(x, y) = 2 * x * y^3
-    df22(x, y) = 4 * x^2 * y^2
+    df22(x, y) = 3 * x^2 * y^2
     df11(x, y) = y^2
     df12(x, y) = 2 * x * y
 

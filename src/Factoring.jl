@@ -306,9 +306,9 @@ function old_edge_path(next_node_constraint, dominating::T, is_dominator::Bool, 
         relation_edges!(next_node_constraint, current_edge, tmp)
 
         if is_dominator
-            filter!(x -> subset(reachable_mask, reachable_variables(x)), tmp) #only accept edges which have reachable roots and variables that match the subgraph
+            filter!(x -> overlap(reachable_variables(current_edge), reachable_variables(x)), tmp)
         else
-            filter!(x -> subset(reachable_mask, reachable_roots(x)), tmp)
+            filter!(x -> overlap(reachable_roots(current_edge), reachable_roots(x)), tmp)
         end
 
         #These two cases can only occur if the subgraph has been destroyed by factorization
@@ -333,26 +333,73 @@ end
 
 function evaluate_subgraph(subgraph::FactorableSubgraph{T,S}) where {T,S<:Union{DominatorSubgraph,PostDominatorSubgraph}}
     constraint = next_edge_constraint(subgraph)
-    sum = Node(0.0)
+    is_dom = S === DominatorSubgraph
+
+    paths_collected = Tuple{Node,BitVector,BitVector}[]
 
     rel_edges = get_edge_vector()
     for edge in relation_edges!(constraint, dominated_node(subgraph), rel_edges)
-        flag, pedges, roots_reach, vars_reach = old_edge_path(constraint, dominating_node(subgraph), S == DominatorSubgraph, reachable(subgraph), edge)
-        #sort by num_uses then from largest to smallest postorder number
+        flag, pedges, roots_reach, vars_reach = old_edge_path(constraint, dominating_node(subgraph), is_dom, reachable(subgraph), edge)
 
         if flag == 1 #non-branching path through subgraph
-
             sort!(pedges, lt=path_sort_order)
-            sum += multiply_sequence(pedges)
-
-            #find sequences of equal times_used and multiply them. Then multiply each of the collapsed sequences to get the final result
+            prod = multiply_sequence(pedges)
+            push!(paths_collected, (prod, copy(vars_reach), copy(roots_reach)))
             reclaim_edge_vector(pedges)
         end
     end
 
-
     reclaim_edge_vector(rel_edges)
-    return sum
+
+    dom = dominating_node(subgraph)
+    dmd = dominated_node(subgraph)
+    result_edges = PathEdge{T}[]
+
+    if is_dom
+        dom_roots = copy(reachable_dominance(subgraph))
+        num_vars = domain_dimension(graph(subgraph))
+
+        var_path_sig = [BitVector(p[2][v] for p in paths_collected) for v in 1:num_vars]
+        unique_sigs = unique(filter(any, var_path_sig))
+        for sig in unique_sigs
+            vars_mask = falses(num_vars)
+            for v in 1:num_vars
+                if var_path_sig[v] == sig
+                    vars_mask[v] = true
+                end
+            end
+            sum_val = Node(0.0)
+            for (idx, (prod, _, _)) in enumerate(paths_collected)
+                if sig[idx]
+                    sum_val += prod
+                end
+            end
+            push!(result_edges, PathEdge(dom, dmd, sum_val, vars_mask, copy(dom_roots)))
+        end
+    else
+        dom_vars = copy(reachable_dominance(subgraph))
+        num_roots = codomain_dimension(graph(subgraph))
+
+        root_path_sig = [BitVector(p[3][r] for p in paths_collected) for r in 1:num_roots]
+        unique_sigs = unique(filter(any, root_path_sig))
+        for sig in unique_sigs
+            roots_mask = falses(num_roots)
+            for r in 1:num_roots
+                if root_path_sig[r] == sig
+                    roots_mask[r] = true
+                end
+            end
+            sum_val = Node(0.0)
+            for (idx, (prod, _, _)) in enumerate(paths_collected)
+                if sig[idx]
+                    sum_val += prod
+                end
+            end
+            push!(result_edges, PathEdge(dom, dmd, sum_val, copy(dom_vars), roots_mask))
+        end
+    end
+
+    return result_edges
 end
 
 function make_factored_edge(subgraph::FactorableSubgraph{T,DominatorSubgraph}, sum::Node) where {T}
@@ -367,24 +414,47 @@ function make_factored_edge(subgraph::FactorableSubgraph{T,PostDominatorSubgraph
     return PathEdge(dominating_node(subgraph), dominated_node(subgraph), sum, vars_reach, roots_reach)
 end
 
+"""
+    make_factored_edge(::FactorableSubgraph, edges::Vector{<:PathEdge})
+
+Helper returning a single `PathEdge` if `edges` has length 1, or the vector `edges` if multiple partitioned edges were created.
+"""
+make_factored_edge(::FactorableSubgraph, edges::Vector{<:PathEdge}) = length(edges) == 1 ? edges[1] : edges
+
 
 """Returns true if a new factorable subgraph was created inside `subgraph` during the factorization process. If true then must compute factorable subgraphs for the edges inside `subgraph`. `subgraph_exists` should be called before executing this function otherwise it may return false when no new subgraphs have been created."""
 function is_branching(subgraph)
     fedges = forward_edges(subgraph, dominated_node(subgraph))
 
-    sub_edges = Set{PathEdge}()
+    visited_masks = Dict{PathEdge,BitVector}()
     bad_subgraph = false
-    for edge in fedges #for each forward edge from the dominated node find all edges on that path. If any edge in the subgraph is visited more than once this means a new factorable subgraph has been created.
+    for edge in fedges #for each forward edge from the dominated node find all edges on that path. If any edge in the subgraph is visited more than once for the same variable/root reachability this means a new factorable subgraph has been created.
+        if !test_edge(subgraph, edge)
+            continue
+        end
         good_edges, tmp = edges_on_path(subgraph, edge)
 
-        if good_edges
+        if !good_edges
+            bad_subgraph = true
+            break
+        else
+            pmask = non_dominance_mask(subgraph, edge)
             for pedge in tmp
-                if in(pedge, sub_edges) #edge has been visited twice.
-                    bad_subgraph = true
-                    break
+                edge_pmask = non_dominance_mask(subgraph, pedge) .& pmask
+                if haskey(visited_masks, pedge)
+                    if overlap(visited_masks[pedge], edge_pmask)
+                        bad_subgraph = true
+                        break
+                    else
+                        visited_masks[pedge] .|= edge_pmask
+                    end
+                else
+                    visited_masks[pedge] = copy(edge_pmask)
                 end
-                push!(sub_edges, pedge)
             end
+        end
+        if bad_subgraph
+            break
         end
     end
 
@@ -392,24 +462,11 @@ function is_branching(subgraph)
 end
 
 """reset root and variable masks for edges in the graph and add a new edge connecting `dominating_node(subgraph)` and `dominated_node(subgraph)` to the graph that has the factored value of the subgraph"""
-function factor_subgraph!(subgraph::FactorableSubgraph{T}) where {T}
-    local new_edge::PathEdge{T}
+function factor_subgraph!(subgraph::FactorableSubgraph{T,S}) where {T,S<:AbstractFactorableSubgraph}
     if subgraph_exists(subgraph)
+        new_edges = PathEdge{T}[]
 
-        if is_branching(subgraph) #handle the uncommon case of factorization creating new factorable subgraphs internal to subgraph
-            sum = evaluate_branching_subgraph(subgraph)
-            new_edge = make_factored_edge(subgraph, sum)
-        else
-            sum = evaluate_subgraph(subgraph)
-            # if value(sum) == 0
-            #     display(subgraph)
-            #     write_dot("sph.svg", graph(subgraph), value_labels=true, reachability_labels=false, start_nodes=[24])
-            # end
-
-            # # @assert value(sum) != 0
-
-            new_edge = make_factored_edge(subgraph, sum)
-        end
+        append!(new_edges, evaluate_subgraph(subgraph))
         add_non_dom_edges!(subgraph)
         #reset roots in R, if possible. All edges earlier in the path than the first vertex with more than one child cannot be reset.
         edges_to_delete = reset_edge_masks!(subgraph)
@@ -417,7 +474,9 @@ function factor_subgraph!(subgraph::FactorableSubgraph{T}) where {T}
             delete_edge!(graph(subgraph), edge)
         end
 
-        add_edge!(graph(subgraph), new_edge)
+        for edge in new_edges
+            add_edge!(graph(subgraph), edge)
+        end
     end
 end
 

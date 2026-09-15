@@ -149,14 +149,14 @@ non_dominance_dimension(subgraph::FactorableSubgraph{T,PostDominatorSubgraph}) w
 forward_vertex(::FactorableSubgraph{T,DominatorSubgraph}, edge::PathEdge) where {T} = top_vertex(edge)
 forward_vertex(::FactorableSubgraph{T,PostDominatorSubgraph}, edge::PathEdge) where {T} = bott_vertex(edge)
 
-function next_valid_edge(a::FactorableSubgraph, current_edge::PathEdge{T}) where {T}
+function next_valid_edge(a::FactorableSubgraph, current_edge::PathEdge{T}, path_mask::Union{Nothing,BitVector}=nothing) where {T}
     if forward_vertex(a, current_edge) == dominating_node(a) #reached the end of the subgraph
         return nothing
     else
         local edge_next::PathEdge{T}
         count = 0
         for edge in forward_edges(a, current_edge) #should always be a next edge because top_vertex(current_edge) != dominance_node(a)
-            if test_edge(a, edge)
+            if test_edge(a, edge) && (path_mask === nothing || overlap(path_mask, non_dominance_mask(a, edge)))
                 count += 1
                 # @assert count ≤ 1 #in a properly processed subgraph there should not be branches on paths from dominated to dominating node.
                 if count > 1
@@ -177,8 +177,9 @@ function isa_connected_path(a::FactorableSubgraph, start_edge::PathEdge{T}) wher
     current_edge = start_edge
 
     if test_edge(a, start_edge) #ensure that start_edge satisfies conditions for being on a connected path
+        pmask = non_dominance_mask(a, start_edge)
         while forward_vertex(a, current_edge) != dominating_node(a)
-            current_edge = next_valid_edge(a, current_edge)
+            current_edge = next_valid_edge(a, current_edge, pmask)
             if current_edge === nothing
                 return false
             end
@@ -195,8 +196,9 @@ function edges_on_path(a::FactorableSubgraph, start_edge::PathEdge{T}) where {T}
     result = PathEdge{T}[]
 
     if test_edge(a, start_edge) #ensure that start_edge satisfies conditions for being on a connected path
+        pmask = non_dominance_mask(a, start_edge)
         while forward_vertex(a, current_edge) != dominating_node(a)
-            current_edge = next_valid_edge(a, current_edge)
+            current_edge = next_valid_edge(a, current_edge, pmask)
             if current_edge === nothing
                 return (false, PathEdge{T}[])
             else
@@ -441,15 +443,16 @@ end
 struct PathIterator{T<:Integer,S<:FactorableSubgraph}
     subgraph::S
     start_edge::PathEdge{T}
+    path_mask::BitVector
 
     function PathIterator(subgraph::S, start_edge::PathEdge{T}) where {T,S<:FactorableSubgraph{T,DominatorSubgraph}}
         @assert bott_vertex(start_edge) == dominated_node(subgraph)
-        return new{T,S}(subgraph, start_edge)
+        return new{T,S}(subgraph, start_edge, copy(non_dominance_mask(subgraph, start_edge)))
     end
 
     function PathIterator(subgraph::S, start_edge::PathEdge{T}) where {T,S<:FactorableSubgraph{T,PostDominatorSubgraph}}
         @assert top_vertex(start_edge) == dominated_node(subgraph)
-        return new{T,S}(subgraph, start_edge)
+        return new{T,S}(subgraph, start_edge, copy(non_dominance_mask(subgraph, start_edge)))
     end
 end
 
@@ -473,7 +476,7 @@ function Base.iterate(a::PathIterator{T,S}, state::PathEdge{T}) where {T,S<:Fact
     if forward_vertex(a.subgraph, state) == dominating_node(a.subgraph)
         return nothing
     else
-        edge_next = next_valid_edge(a.subgraph, state)
+        edge_next = next_valid_edge(a.subgraph, state, a.path_mask)
 
         @assert edge_next !== nothing #tested for connected path when creating iterator so should never get nothing return because edge is not at the dominator node
 
