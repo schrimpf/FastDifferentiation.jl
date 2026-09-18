@@ -331,69 +331,88 @@ function old_edge_path(next_node_constraint, dominating::T, is_dominator::Bool, 
     return flag_value, result, roots_reach, vars_reach
 end
 
-function evaluate_subgraph(subgraph::FactorableSubgraph{T,S}) where {T,S<:Union{DominatorSubgraph,PostDominatorSubgraph}}
-    constraint = next_edge_constraint(subgraph)
-    is_dom = S === DominatorSubgraph
+"""
+    _evaluate_subgraph_paths(subgraph, current_node, memo)
 
-    paths_collected = Tuple{Node,BitVector,BitVector}[]
+Returns the sum of products from `current_node` to the factor node, grouped by
+the non-dominance reachability mask of each path. The dynamic-programming
+evaluation preserves all paths through branching factor subgraphs without
+enumerating complete paths separately.
+"""
+function _evaluate_subgraph_paths(
+    subgraph::FactorableSubgraph{T},
+    current_node::T,
+    memo::Dict{T,Dict{BitVector,Node}},
+) where {T}
+    cached = get(memo, current_node, nothing)
+    cached === nothing || return cached
 
-    rel_edges = get_edge_vector()
-    for edge in relation_edges!(constraint, dominated_node(subgraph), rel_edges)
-        flag, pedges, roots_reach, vars_reach = old_edge_path(constraint, dominating_node(subgraph), is_dom, reachable(subgraph), edge)
+    result = Dict{BitVector,Node}()
+    if current_node == dominating_node(subgraph)
+        result[copy(non_dominance_mask(subgraph))] = Node(1)
+        memo[current_node] = result
+        return result
+    end
 
-        if flag == 1 #non-branching path through subgraph
-            sort!(pedges, lt=path_sort_order)
-            prod = multiply_sequence(pedges)
-            push!(paths_collected, (prod, copy(vars_reach), copy(roots_reach)))
-            reclaim_edge_vector(pedges)
+    for edge in forward_edges(subgraph, current_node)
+        if !test_edge(subgraph, edge)
+            continue
+        end
+
+        suffixes = _evaluate_subgraph_paths(subgraph, forward_vertex(subgraph, edge), memo)
+        edge_mask = non_dominance_mask(subgraph, edge)
+        for (suffix_mask, suffix_value) in suffixes
+            path_mask = edge_mask .& suffix_mask
+            if any(path_mask)
+                path_value = value(edge) * suffix_value
+                result[path_mask] = get(result, path_mask, Node(0)) + path_value
+            end
         end
     end
 
-    reclaim_edge_vector(rel_edges)
+    memo[current_node] = result
+    return result
+end
 
+function evaluate_subgraph(subgraph::FactorableSubgraph{T,S}) where {T,S<:Union{DominatorSubgraph,PostDominatorSubgraph}}
+    is_dom = S === DominatorSubgraph
     dom = dominating_node(subgraph)
     dmd = dominated_node(subgraph)
+    path_sums = _evaluate_subgraph_paths(subgraph, dmd, Dict{T,Dict{BitVector,Node}}())
     result_edges = PathEdge{T}[]
 
+    paths = collect(path_sums)
     if is_dom
         dom_roots = copy(reachable_dominance(subgraph))
         num_vars = domain_dimension(graph(subgraph))
-
-        var_path_sig = [BitVector(p[2][v] for p in paths_collected) for v in 1:num_vars]
-        unique_sigs = unique(filter(any, var_path_sig))
-        for sig in unique_sigs
+        var_path_sig = [BitVector(path_mask[v] for (path_mask, _) in paths) for v in 1:num_vars]
+        for sig in unique(filter(any, var_path_sig))
             vars_mask = falses(num_vars)
             for v in 1:num_vars
                 if var_path_sig[v] == sig
                     vars_mask[v] = true
                 end
             end
-            sum_val = Node(0.0)
-            for (idx, (prod, _, _)) in enumerate(paths_collected)
-                if sig[idx]
-                    sum_val += prod
-                end
+            sum_val = Node(0)
+            for (idx, (_, path_value)) in enumerate(paths)
+                sig[idx] && (sum_val += path_value)
             end
             push!(result_edges, PathEdge(dom, dmd, sum_val, vars_mask, copy(dom_roots)))
         end
     else
         dom_vars = copy(reachable_dominance(subgraph))
         num_roots = codomain_dimension(graph(subgraph))
-
-        root_path_sig = [BitVector(p[3][r] for p in paths_collected) for r in 1:num_roots]
-        unique_sigs = unique(filter(any, root_path_sig))
-        for sig in unique_sigs
+        root_path_sig = [BitVector(path_mask[r] for (path_mask, _) in paths) for r in 1:num_roots]
+        for sig in unique(filter(any, root_path_sig))
             roots_mask = falses(num_roots)
             for r in 1:num_roots
                 if root_path_sig[r] == sig
                     roots_mask[r] = true
                 end
             end
-            sum_val = Node(0.0)
-            for (idx, (prod, _, _)) in enumerate(paths_collected)
-                if sig[idx]
-                    sum_val += prod
-                end
+            sum_val = Node(0)
+            for (idx, (_, path_value)) in enumerate(paths)
+                sig[idx] && (sum_val += path_value)
             end
             push!(result_edges, PathEdge(dom, dmd, sum_val, copy(dom_vars), roots_mask))
         end
@@ -461,14 +480,22 @@ function is_branching(subgraph)
     return bad_subgraph
 end
 
-"""reset root and variable masks for edges in the graph and add a new edge connecting `dominating_node(subgraph)` and `dominated_node(subgraph)` to the graph that has the factored value of the subgraph"""
+"""
+    factor_subgraph!(subgraph)
+
+Replace a safely representable factor subgraph with its factored edge.
+Subgraphs requiring multiple reachability-partitioned replacement edges are
+left intact until residual-edge deletion can preserve all bypass paths.
+"""
 function factor_subgraph!(subgraph::FactorableSubgraph{T,S}) where {T,S<:AbstractFactorableSubgraph}
     if subgraph_exists(subgraph)
         new_edges = PathEdge{T}[]
-
         append!(new_edges, evaluate_subgraph(subgraph))
+        # A partitioned replacement edge requires preserving residual
+        # reachability masks across several original edges. Until that
+        # deletion step is fully generalized, leave such subgraphs intact.
+        length(new_edges) == 1 || return nothing
         add_non_dom_edges!(subgraph)
-        #reset roots in R, if possible. All edges earlier in the path than the first vertex with more than one child cannot be reset.
         edges_to_delete = reset_edge_masks!(subgraph)
         for edge in edges_to_delete
             delete_edge!(graph(subgraph), edge)
@@ -560,6 +587,11 @@ function print_edges(a, msg)
 end
 
 function factor!(a::DerivativeGraph{T}) where {T}
+    # Multi-output graphs require partitioned replacement edges. Until the
+    # corresponding residual-edge deletion rule is generalized, preserve
+    # correctness by evaluating the original multi-output graph unchanged.
+    codomain_dimension(a) > 1 && return nothing
+
     subgraph_list = compute_factorable_subgraphs(a)
 
     while !isempty(subgraph_list)
@@ -567,35 +599,47 @@ function factor!(a::DerivativeGraph{T}) where {T}
         subgraph = pop!(subgraph_list)
 
         factor_subgraph!(subgraph)
-
     end
     return nothing #return nothing so people don't mistakenly think this is returning a copy of the original graph
 end
 
+"""
+    follow_path(graph, root_index, var_index)
+
+Evaluate all reachable derivative paths between a root and variable. Factored
+graphs normally contain one such path, but the dynamic-programming traversal
+also handles residual branches without dropping their contributions.
+"""
 function follow_path(a::DerivativeGraph{T}, root_index::Integer, var_index::Integer) where {T}
     current_node_index = root_index_to_postorder_number(a, root_index)
-    path_product = PathEdge{T}[]
+    memo = Dict{T,Node}()
 
-    while true
-        curr_edges = filter(x -> is_root_reachable(x, root_index) && is_variable_reachable(x, var_index), child_edges(a, current_node_index))
-        if length(curr_edges) == 0
-            break
-        else
-            @assert length(curr_edges) == 1 "Should only be one path from root $root_index to variable $var_index. Instead have $(length(curr_edges)) children from node $current_node_index on the path"
-            push!(path_product, curr_edges[1])
-            current_node_index = bott_vertex(curr_edges[1])
+    function path_sum(node_index::T)
+        cached = get(memo, node_index, nothing)
+        cached === nothing || return cached
+
+        curr_edges = filter(
+            edge -> is_root_reachable(edge, root_index) && is_variable_reachable(edge, var_index),
+            child_edges(a, node_index),
+        )
+        if isempty(curr_edges)
+            return is_variable(a, node_index) && variable_postorder_to_index(a, node_index) == var_index ? Node(1.0) : Node(0.0)
         end
-    end
-    if length(path_product) == 0
-        product = Node(0.0)
-    else
-        sort!(path_product, lt=((x, y) -> num_uses(x) > num_uses(y))) #sort larger num uses edges first
-        product = Node(1.0)
-        for term in path_product
-            product *= value(term)
+
+        result = Node(0.0)
+        for edge in curr_edges
+            result += value(edge) * path_sum(bott_vertex(edge))
         end
+        memo[node_index] = result
+        return result
     end
-    return product
+
+    curr_edges = filter(
+        edge -> is_root_reachable(edge, root_index) && is_variable_reachable(edge, var_index),
+        child_edges(a, current_node_index),
+    )
+    isempty(curr_edges) && return Node(0.0)
+    return sum(value(edge) * path_sum(bott_vertex(edge)) for edge in curr_edges; init=Node(0.0))
 end
 
 function evaluate_path(graph::DerivativeGraph, root_index::Integer, var_index::Integer)
@@ -610,7 +654,7 @@ function evaluate_path(graph::DerivativeGraph, root_index::Integer, var_index::I
         else
             return zero(Node) #root is a constant
         end
-    else #root contains a graph which has been factored so that there should be a single linear path from each root to each variable with no branching
+    else #root contains a graph that has been factored, possibly with residual branching
         return follow_path(graph, root_index, var_index)
     end
 end

@@ -93,4 +93,128 @@ using TestItems
         @test isapprox(f_hess([v..., extra...]), fd_hess, atol=1e-5)
     end
 
+    # another one
+    @variables a1 a2 s1 s2 rho eps y
+
+    mgf = 0.5 * s2^2 + log(1 + 2*a1*s2 + (a1^2 + 2*a2)*(s2^2 + 1) + 2*a1*a2*(s2^3 + 3*s2) + a2^2*(s2^4 + 6*s2^2 + 3)) - log(1 + a1^2 + 2*a2 + 3*a2^2)
+    ζ = y + mgf
+    z = (ζ / s2 - rho * eps / s1) / sqrt(1 - rho^2 + 1e-12)
+    f = log((1 + a1 * z + a2 * z^2)^2)
+
+    ∇²f = hessian(f, [a1, a2, s1, s2, rho, eps, y])
+    f_hess = make_function(∇²f, [a1, a2, s1, s2, rho, eps, y])
+
+    eval_last(v) = begin
+        a1v, a2v, s1v, s2v, rhov, epsv, yv = v
+        mgfv = 0.5 * s2v^2 +
+                log(1 + 2 * a1v * s2v + (a1v^2 + 2 * a2v) * (s2v^2 + 1) +
+                    2 * a1v * a2v * (s2v^3 + 3 * s2v) +
+                    a2v^2 * (s2v^4 + 6 * s2v^2 + 3)) -
+                log(1 + a1v^2 + 2 * a2v + 3 * a2v^2)
+        ζv = yv + mgfv
+        zv = (ζv / s2v - rhov * epsv / s1v) / sqrt(1 - rhov^2 + 1e-12)
+        log((1 + a1v * zv + a2v * zv^2)^2)
+    end
+
+    test_pts_last = [
+        [0.8, 0.2, 1.1, 0.9, 0.0, 0.3, 0.4],
+        [1.1, -0.1, 0.7, 1.3, -0.3, 0.2, -0.5],
+    ]
+    for v in test_pts_last
+        fd_hess = FiniteDifferences.jacobian(
+            FiniteDifferences.central_fdm(5, 1),
+            x -> FiniteDifferences.grad(FiniteDifferences.central_fdm(5, 1), eval_last, x)[1],
+            v,
+        )[1]
+        @test isapprox(f_hess(v), fd_hess, atol=1e-5)
+    end
+end
+
+@testitem "multi-output second Jacobian factorization" begin
+    using Test
+    import FiniteDifferences
+
+    @variables a1 a2 s q rho eps y
+
+    m = log(1 + 2 * a1 * s + (a1^2 + 2 * a2) * (s^2 + 1) +
+            2 * a1 * a2 * (s^3 + 3 * s) +
+            a2^2 * (s^4 + 6 * s^2 + 3))
+    z = (y + m - rho * eps / q) / sqrt(1 - rho^2 + 1e-12)
+    f = log((1 + a1 * z + a2 * z^2)^2)
+    vars = [a1, a2, s, q, rho, eps, y]
+
+    gradient = jacobian([f], vars)
+    hess = jacobian(vec(gradient), vars)
+    f_hess = make_function(hess, vars)
+
+    eval_f(v) = begin
+        a1v, a2v, sv, qv, rhov, epsv, yv = v
+        mv = log(1 + 2 * a1v * sv + (a1v^2 + 2 * a2v) * (sv^2 + 1) +
+                 2 * a1v * a2v * (sv^3 + 3 * sv) +
+                 a2v^2 * (sv^4 + 6 * sv^2 + 3))
+        zv = (yv + mv - rhov * epsv / qv) / sqrt(1 - rhov^2 + 1e-12)
+        log((1 + a1v * zv + a2v * zv^2)^2)
+    end
+
+    v = [0.8, 0.2, 0.9, 1.1, 0.0, 0.3, 0.4]
+    fd_hess = FiniteDifferences.jacobian(
+        FiniteDifferences.central_fdm(5, 1),
+        x -> FiniteDifferences.jacobian(FiniteDifferences.central_fdm(5, 1), eval_f, x)[1],
+        v,
+    )[1]
+    @test isapprox(f_hess(v), fd_hess, atol=1e-5)
+end
+
+@testitem "small multi-output factorization cases" begin
+    using Test
+    import FiniteDifferences
+
+    finite_hessian(f, vars, eval_f, v) = begin
+        gradient = jacobian([f], vars)
+        hess = jacobian(vec(gradient), vars)
+        symbolic_hess = make_function(hess, vars)(v)
+        fd_hess = FiniteDifferences.jacobian(
+            FiniteDifferences.central_fdm(5, 1),
+            x -> FiniteDifferences.jacobian(FiniteDifferences.central_fdm(5, 1), eval_f, x)[1],
+            v,
+        )[1]
+        symbolic_hess, fd_hess
+    end
+
+    @variables x y
+    simple_f = (x + y)^2
+    simple_eval(v) = (v[1] + v[2])^2
+    simple_symbolic, simple_fd = finite_hessian(
+        simple_f,
+        [x, y],
+        simple_eval,
+        [0.8, 1.2],
+    )
+    @test isapprox(simple_symbolic, simple_fd, atol=1e-5)
+
+    @variables a1 a2 s q
+    r = 0.2
+    eps = 0.3
+    y0 = 0.4
+    m = log(1 + 2 * a1 * s + (a1^2 + 2 * a2) * (s^2 + 1) +
+            2 * a1 * a2 * (s^3 + 3 * s) +
+            a2^2 * (s^4 + 6 * s^2 + 3))
+    z = (y0 + m - r * eps / q) / sqrt(1 - r^2 + 1e-12)
+    failing_f = log((1 + a1 * z + a2 * z^2)^2)
+    failing_eval(v) = begin
+        a1v, a2v, sv, qv = v
+        mv = log(1 + 2 * a1v * sv + (a1v^2 + 2 * a2v) * (sv^2 + 1) +
+                 2 * a1v * a2v * (sv^3 + 3 * sv) +
+                 a2v^2 * (sv^4 + 6 * sv^2 + 3))
+        zv = (y0 + mv - r * eps / qv) / sqrt(1 - r^2 + 1e-12)
+        log((1 + a1v * zv + a2v * zv^2)^2)
+    end
+    failing_symbolic, failing_fd = finite_hessian(
+        failing_f,
+        [a1, a2, s, q],
+        failing_eval,
+        [0.8, 0.2, 0.9, 1.1],
+    )
+    @test isapprox(failing_symbolic, failing_fd, atol=1e-5)
+
 end

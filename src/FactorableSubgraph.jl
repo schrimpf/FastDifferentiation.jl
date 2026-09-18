@@ -256,23 +256,17 @@ function reset_edge_masks!(subgraph::FactorableSubgraph{T}) where {T}
     edges_to_delete = PathEdge{T}[]
 
     for fwd_edge in forward_edges(subgraph, dominated_node(subgraph))
-        bypass_mask = .!copy(non_dominance_mask(subgraph)) #bypass mask tracks which variables/roots are on a backward path that bypasses the dominated_node. These variables/roots cannot be reset. 0 means can be reset 1 means can't.
+        bypass_mask = .!copy(non_dominance_mask(subgraph))
 
         if test_edge(subgraph, fwd_edge)
             for pedge in edge_path(subgraph, fwd_edge)
 
                 mask = non_dominance_mask(subgraph, pedge)
-                @. mask = mask & bypass_mask #if any bits in bypass mask are 1 then those bits won't be reset. 
-
-                if !any(bypass_mask .& non_dominance_mask(subgraph)) #no edges bypass dominated node so can reset all dominance bits. If any edges bypass cannot reset any dominance bits.
-                    fmask = reachable_dominance(subgraph, fwd_edge)
-                    fmask = fmask .& .!reachable_dominance(subgraph)
-                end
+                @. mask = mask & bypass_mask
 
                 if forward_vertex(subgraph, pedge) != dominating_node(subgraph)
                     for bedge in backward_edges(subgraph, pedge)
                         if test_edge(subgraph, bedge) && bedge !== pedge
-                            #want to test by object identity - don't want to include the non_dom mask of the current edge 
                             bypass_mask .|= non_dominance_mask(subgraph, bedge)
                         end
                     end

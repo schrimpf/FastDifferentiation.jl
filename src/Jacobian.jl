@@ -36,6 +36,14 @@ function _symbolic_jacobian!(graph::DerivativeGraph, partial_variables::Abstract
     outdim = codomain_dimension(graph)
 
     result = Matrix{Node}(undef, outdim, length(partial_variables))
+    if outdim > 1
+        for root_index in 1:outdim
+            row_graph = DerivativeGraph([roots(graph)[root_index]])
+            result[root_index, :] .= vec(_symbolic_jacobian!(row_graph, partial_variables))
+        end
+        return result
+    end
+
     factor!(graph)
 
     @assert verify_paths(graph) #ensure a single path from each root to each variable. Derivative is likely incorrect if this is not true.
@@ -282,12 +290,20 @@ julia> hessian(x^2*y^2,[x,y])
  (2 * (y ^ 2))  (4 * (y * x))
  (4 * (x * y))  (2 * (x ^ 2))
 ```
-"""
+
+ Gradient components are differentiated one at a time so each second-order
+ factorization operates on a single-output graph. This avoids combining
+ residual reachability branches from different gradient components.
+ """
 function hessian(expression::Node, variable_order::AbstractVector{S}) where {S<:Node} #would prefer to return a Symmetric matrix but that type only works with elements that are subtypes of Number. Which Node is not. Fix later, if possible.
     tmp = DerivativeGraph(expression)
     jac = _symbolic_jacobian!(tmp, variable_order)
-    tmp2 = DerivativeGraph(vec(jac))
-    return _symbolic_jacobian!(tmp2, variable_order)
+    rows = Matrix{Node}[]
+    for i in axes(jac, 2)
+        row_graph = DerivativeGraph([jac[1, i]])
+        push!(rows, _symbolic_jacobian!(row_graph, variable_order))
+    end
+    return vcat(rows...)
 end
 export hessian
 
