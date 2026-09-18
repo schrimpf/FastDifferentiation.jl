@@ -215,27 +215,22 @@ end
 """
     add_non_dom_edges!(subgraph::FactorableSubgraph{T,S})
 
-Splits edges which have roots not in the `dominance_mask` of `subgraph`. Original edge has only roots in `dominance_mask`. A new edge is added to the graph that contains only roots not in `dominance_mask`."""
+Splits boundary edges leaving `dominated_node(subgraph)` that have roots/variables not in the `dominance_mask` of `subgraph`. The original edge retains only roots/variables in `dominance_mask`. A new edge is added to the graph that contains only roots/variables not in `dominance_mask`."""
 function add_non_dom_edges!(subgraph::FactorableSubgraph{T,S}) where {T,S<:AbstractFactorableSubgraph}
     temp_edges = PathEdge{T}[]
 
     for s_edge in forward_edges(subgraph, dominated_node(subgraph))
         if test_edge(subgraph, s_edge)
-            for pedge in edge_path(subgraph, s_edge)
-                edge_mask = reachable_dominance(subgraph, pedge)
-                diff = set_diff(edge_mask, reachable_dominance(subgraph)) #important that diff is a new BitVector, not reused.
-                if any(diff)
-                    gr = graph(subgraph)
-
-                    if S === DominatorSubgraph
-                        push!(temp_edges, PathEdge(top_vertex(pedge), bott_vertex(pedge), value(pedge), copy(reachable_variables(pedge)), diff)) #create a new edge that accounts for roots not in the dominance mask
-                    else
-
-                        push!(temp_edges, PathEdge(top_vertex(pedge), bott_vertex(pedge), value(pedge), diff, copy(reachable_roots(pedge)))) #create a new edge that accounts for roots not in the     dominance mask    
-                    end
-
-                    @. edge_mask &= !diff #in the original edge reset the roots/variables not in dominance mask
+            edge_mask = reachable_dominance(subgraph, s_edge)
+            diff = set_diff(edge_mask, reachable_dominance(subgraph)) #important that diff is a new BitVector, not reused.
+            if any(diff)
+                if S === DominatorSubgraph
+                    push!(temp_edges, PathEdge(top_vertex(s_edge), bott_vertex(s_edge), value(s_edge), copy(reachable_variables(s_edge)), diff)) #create a new edge that accounts for roots not in the dominance mask
+                else
+                    push!(temp_edges, PathEdge(top_vertex(s_edge), bott_vertex(s_edge), value(s_edge), diff, copy(reachable_roots(s_edge)))) #create a new edge that accounts for roots not in the dominance mask
                 end
+
+                @. edge_mask &= !diff #in the original edge reset the roots/variables not in dominance mask
             end
         end
     end
@@ -251,30 +246,18 @@ end
 """
     reset_edge_masks!(subgraph::FactorableSubgraph{T})
 
-Sets the reachable root and variable masks for every edge in `DominatorSubgraph` `subgraph`. """
+Resets the non-dominance reachable masks for the boundary edges leaving `dominated_node(subgraph)` that are factored by this partition, returning any edges that can now be deleted."""
 function reset_edge_masks!(subgraph::FactorableSubgraph{T}) where {T}
     edges_to_delete = PathEdge{T}[]
+    bypass_mask = .!copy(non_dominance_mask(subgraph))
 
     for fwd_edge in forward_edges(subgraph, dominated_node(subgraph))
-        bypass_mask = .!copy(non_dominance_mask(subgraph))
-
         if test_edge(subgraph, fwd_edge)
-            for pedge in edge_path(subgraph, fwd_edge)
+            mask = non_dominance_mask(subgraph, fwd_edge)
+            @. mask = mask & bypass_mask
 
-                mask = non_dominance_mask(subgraph, pedge)
-                @. mask = mask & bypass_mask
-
-                if forward_vertex(subgraph, pedge) != dominating_node(subgraph)
-                    for bedge in backward_edges(subgraph, pedge)
-                        if test_edge(subgraph, bedge) && bedge !== pedge
-                            bypass_mask .|= non_dominance_mask(subgraph, bedge)
-                        end
-                    end
-                end
-
-                if can_delete(pedge)
-                    push!(edges_to_delete, pedge)
-                end
+            if can_delete(fwd_edge)
+                push!(edges_to_delete, fwd_edge)
             end
         end
     end

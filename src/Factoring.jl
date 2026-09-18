@@ -483,26 +483,42 @@ end
 """
     factor_subgraph!(subgraph)
 
-Replace a safely representable factor subgraph with its factored edge.
-Subgraphs requiring multiple reachability-partitioned replacement edges are
-left intact until residual-edge deletion can preserve all bypass paths.
+Replace a factorable subgraph with its factored replacement edge(s), splitting boundary non-dominance
+reachability masks and removing factored reachability at `dominated_node(subgraph)`.
 """
 function factor_subgraph!(subgraph::FactorableSubgraph{T,S}) where {T,S<:AbstractFactorableSubgraph}
     if subgraph_exists(subgraph)
+        graph_value = graph(subgraph)
         new_edges = PathEdge{T}[]
         append!(new_edges, evaluate_subgraph(subgraph))
-        # A partitioned replacement edge requires preserving residual
-        # reachability masks across several original edges. Until that
-        # deletion step is fully generalized, leave such subgraphs intact.
-        length(new_edges) == 1 || return nothing
-        add_non_dom_edges!(subgraph)
-        edges_to_delete = reset_edge_masks!(subgraph)
-        for edge in edges_to_delete
-            delete_edge!(graph(subgraph), edge)
-        end
 
-        for edge in new_edges
-            add_edge!(graph(subgraph), edge)
+        for new_edge in new_edges
+            partition = if S === DominatorSubgraph
+                dominator_subgraph(
+                    graph_value,
+                    dominating_node(subgraph),
+                    dominated_node(subgraph),
+                    copy(reachable_dominance(subgraph)),
+                    copy(reachable_roots(new_edge)),
+                    copy(reachable_variables(new_edge)),
+                )
+            else
+                postdominator_subgraph(
+                    graph_value,
+                    dominating_node(subgraph),
+                    dominated_node(subgraph),
+                    copy(reachable_dominance(subgraph)),
+                    copy(reachable_roots(new_edge)),
+                    copy(reachable_variables(new_edge)),
+                )
+            end
+
+            add_non_dom_edges!(partition)
+            edges_to_delete = reset_edge_masks!(partition)
+            for edge in edges_to_delete
+                delete_edge!(graph_value, edge)
+            end
+            add_edge!(graph_value, new_edge)
         end
     end
 end
@@ -587,17 +603,10 @@ function print_edges(a, msg)
 end
 
 function factor!(a::DerivativeGraph{T}) where {T}
-    # Multi-output graphs require partitioned replacement edges. Until the
-    # corresponding residual-edge deletion rule is generalized, preserve
-    # correctness by evaluating the original multi-output graph unchanged.
-    codomain_dimension(a) > 1 && return nothing
-
     subgraph_list = compute_factorable_subgraphs(a)
 
     while !isempty(subgraph_list)
-
         subgraph = pop!(subgraph_list)
-
         factor_subgraph!(subgraph)
     end
     return nothing #return nothing so people don't mistakenly think this is returning a copy of the original graph
